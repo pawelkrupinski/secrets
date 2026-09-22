@@ -92,11 +92,32 @@ final class Daemon {
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
                     if let key = request.key {
-                        let variants = try TaggedSecrets.listVariants(namespace: namespace, key: key)
-                        return Response(ok: true, value: nil, keys: variants, locked: false, error: nil)
+                        var lines: [String] = []
+                        if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
+                            lines.append("description: \(description)")
+                        }
+                        lines += try TaggedSecrets.listVariants(namespace: namespace, key: key)
+                        return Response(ok: true, value: nil, keys: lines, locked: false, error: nil)
                     }
                     let keys = try KeychainStore.list(namespace: namespace)
-                    return Response(ok: true, value: nil, keys: keys, locked: false, error: nil)
+                    let lines = keys.map { key -> String in
+                        if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
+                            return "\(key) — \(description)"
+                        }
+                        return key
+                    }
+                    return Response(ok: true, value: nil, keys: lines, locked: false, error: nil)
+                } catch {
+                    return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
+                }
+            }
+
+        case "describe":
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
+                do {
+                    try TaggedSecrets.setDescription(namespace: namespace, key: request.key ?? "", description: request.value ?? "")
+                    log("described \(namespace)/\(request.key ?? "?")")
+                    return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
                 }

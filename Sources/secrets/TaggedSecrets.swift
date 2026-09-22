@@ -8,27 +8,29 @@ struct SecretVariant: Codable, Equatable {
     let value: String
 }
 
-/// The on-disk shape for a key that has ever had a tagged SET. Marked with
-/// its own flag so a plain legacy value (any key set before this feature
-/// existed, or any key that's never used tags) is never mistaken for one —
-/// a legacy value is just a raw string, not JSON, so decoding this struct
-/// from it fails and callers fall back to treating it as a single untagged
-/// value. That's what keeps every already-migrated secret working unchanged.
+/// The on-disk shape for a key that has ever had a tagged SET or a
+/// description. Marked with its own flag so a plain legacy value (any key
+/// set before this feature existed, or any key that's never used tags or a
+/// description) is never mistaken for one — a legacy value is just a raw
+/// string, not JSON, so decoding this struct from it fails and callers fall
+/// back to treating it as a single untagged value with no description.
+/// That's what keeps every already-migrated secret working unchanged.
 struct SecretEnvelope: Codable {
     var secretsVaultVariants: Bool
+    var description: String?
     var variants: [SecretVariant]
 }
 
 enum TaggedSecretError: Error, CustomStringConvertible {
     case noVariantForTags(available: [[String: String]])
-    case ambiguousUntagged(available: [[String: String]])
+    case noValueYet
 
     var description: String {
         switch self {
         case .noVariantForTags(let available):
             return "no variant stored for those tags. Available: \(TaggedSecrets.describe(available))"
-        case .ambiguousUntagged(let available):
-            return "no untagged default value — this key only has tagged variants. Available: \(TaggedSecrets.describe(available))"
+        case .noValueYet:
+            return "no value stored for this key yet — `secrets set` it before describing it"
         }
     }
 }
@@ -81,7 +83,7 @@ enum TaggedSecrets {
         if let existingRaw, let envelope = decodeEnvelope(existingRaw) {
             var variants = envelope.variants.filter { $0.tags != tags }
             variants.append(SecretVariant(tags: tags, value: value))
-            let updated = SecretEnvelope(secretsVaultVariants: true, variants: variants)
+            let updated = SecretEnvelope(secretsVaultVariants: true, description: envelope.description, variants: variants)
             try KeychainStore.set(namespace: namespace, key: key, value: try encodeEnvelope(updated))
             return
         }
@@ -99,7 +101,7 @@ enum TaggedSecrets {
         if let existingRaw {
             variants.append(SecretVariant(tags: [:], value: existingRaw))
         }
-        let envelope = SecretEnvelope(secretsVaultVariants: true, variants: variants)
+        let envelope = SecretEnvelope(secretsVaultVariants: true, description: nil, variants: variants)
         try KeychainStore.set(namespace: namespace, key: key, value: try encodeEnvelope(envelope))
     }
 
@@ -115,7 +117,7 @@ enum TaggedSecrets {
         if remaining.isEmpty {
             try KeychainStore.delete(namespace: namespace, key: key)
         } else {
-            let updated = SecretEnvelope(secretsVaultVariants: true, variants: remaining)
+            let updated = SecretEnvelope(secretsVaultVariants: true, description: envelope.description, variants: remaining)
             try KeychainStore.set(namespace: namespace, key: key, value: try encodeEnvelope(updated))
         }
     }
@@ -125,5 +127,33 @@ enum TaggedSecrets {
         let raw = try KeychainStore.get(namespace: namespace, key: key)
         guard let envelope = decodeEnvelope(raw) else { return ["(untagged)"] }
         return envelope.variants.map { canonicalLabel($0.tags) }.sorted()
+    }
+
+    /// A one-line human-readable note on what a key IS, independent of which
+    /// tagged variant — e.g. "MongoDB connection string for the primary db".
+    /// Applies to the whole key, not per-variant, since tags already describe
+    /// how variants differ.
+    static func setDescription(namespace: String, key: String, description: String) throws {
+        let existingRaw = try? KeychainStore.get(namespace: namespace, key: key)
+
+        if let existingRaw, let envelope = decodeEnvelope(existingRaw) {
+            let updated = SecretEnvelope(secretsVaultVariants: true, description: description, variants: envelope.variants)
+            try KeychainStore.set(namespace: namespace, key: key, value: try encodeEnvelope(updated))
+            return
+        }
+
+        guard let existingRaw else {
+            throw TaggedSecretError.noValueYet
+        }
+        // Upgrade a plain legacy value into an envelope so it has somewhere
+        // to carry the description, keeping it as the sole untagged variant.
+        let envelope = SecretEnvelope(secretsVaultVariants: true, description: description,
+                                       variants: [SecretVariant(tags: [:], value: existingRaw)])
+        try KeychainStore.set(namespace: namespace, key: key, value: try encodeEnvelope(envelope))
+    }
+
+    static func getDescription(namespace: String, key: String) -> String? {
+        guard let raw = try? KeychainStore.get(namespace: namespace, key: key) else { return nil }
+        return decodeEnvelope(raw)?.description
     }
 }

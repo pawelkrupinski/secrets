@@ -23,14 +23,16 @@ func printUsage() {
       status [NAMESPACE]               show unlocked namespaces, or whether one is unlocked
       get NAMESPACE KEY [tag=value...] print the secret value for KEY (untagged, or the matching tagged variant)
       set NAMESPACE KEY [tag=value...] store KEY, reading its value from stdin
+      describe NAMESPACE KEY           set/update KEY's description, reading it from stdin
       delete NAMESPACE KEY [tag=value...]  remove KEY (untagged, or one tagged variant)
-      list NAMESPACE                   list stored key names in NAMESPACE (not values)
-      list NAMESPACE KEY                list KEY's stored tag variants (not values)
+      list NAMESPACE                   list stored key names in NAMESPACE, with descriptions (not values)
+      list NAMESPACE KEY                list KEY's description + stored tag variants (not values)
       daemon                            run the background daemon (used by the LaunchAgent — don't call directly)
 
     examples:
       secrets set movies MONGODB_URI environment=production app=web <<< "mongodb://prod-web..."
       secrets set movies MONGODB_URI environment=production app=worker <<< "mongodb://prod-worker..."
+      secrets describe movies MONGODB_URI <<< "Primary app database connection string"
       secrets get movies MONGODB_URI environment=production app=web
       secrets list movies MONGODB_URI
     """)
@@ -119,6 +121,10 @@ case "set":
     guard arguments.count > 3 else { print("usage: secrets set NAMESPACE KEY [tag=value ...]   (value read from stdin)"); exit(1) }
     guard let tags = parseTags(Array(arguments[4...])) else { print("bad tag argument, expected key=value"); exit(1) }
     runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readStdin(), tags: tags))
+
+case "describe":
+    guard arguments.count > 3 else { print("usage: secrets describe NAMESPACE KEY   (description read from stdin)"); exit(1) }
+    runClient(Request(op: "describe", namespace: arguments[2], key: arguments[3], value: readStdin(), tags: nil))
 
 case "delete":
     guard arguments.count > 3 else { print("usage: secrets delete NAMESPACE KEY [tag=value ...]"); exit(1) }
