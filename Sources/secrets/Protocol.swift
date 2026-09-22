@@ -5,6 +5,7 @@ struct Request: Codable {
     let namespace: String?
     let key: String?
     let value: String?
+    let tags: [String: String]?
 }
 
 struct Response: Codable {

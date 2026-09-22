@@ -5,21 +5,34 @@ let socketPath = socketDir + "/secrets.sock"
 
 func printUsage() {
     print("""
-    usage: secrets <command> <namespace> [args]
+    usage: secrets <command> <namespace> [args] [tag=value ...]
 
     Namespaces scope both the Keychain storage and the Touch ID grant —
     unlocking "movies" never authorizes "bitcashier", even in the same
     session. Pick one namespace per app/project (e.g. "movies", "bitcashier").
 
+    Within a namespace, a KEY can hold multiple TAGGED VARIANTS of the same
+    secret — e.g. one MONGODB_URI per environment/app. Trailing tag=value
+    pairs on get/set/delete select or create a variant; omit them for the
+    plain untagged value (fully backward compatible with keys that never use
+    tags).
+
     commands:
-      unlock NAMESPACE          authorize this session for NAMESPACE with Touch ID
-      lock [NAMESPACE]          end authorization for NAMESPACE, or all namespaces if omitted
-      status [NAMESPACE]        show unlocked namespaces, or whether one is unlocked
-      get NAMESPACE KEY         print the secret value for KEY
-      set NAMESPACE KEY         store KEY, reading its value from stdin
-      delete NAMESPACE KEY      remove KEY
-      list NAMESPACE            list stored key names in NAMESPACE (not values)
-      daemon                    run the background daemon (used by the LaunchAgent — don't call directly)
+      unlock NAMESPACE                 authorize this session for NAMESPACE with Touch ID
+      lock [NAMESPACE]                 end authorization for NAMESPACE, or all namespaces if omitted
+      status [NAMESPACE]               show unlocked namespaces, or whether one is unlocked
+      get NAMESPACE KEY [tag=value...] print the secret value for KEY (untagged, or the matching tagged variant)
+      set NAMESPACE KEY [tag=value...] store KEY, reading its value from stdin
+      delete NAMESPACE KEY [tag=value...]  remove KEY (untagged, or one tagged variant)
+      list NAMESPACE                   list stored key names in NAMESPACE (not values)
+      list NAMESPACE KEY                list KEY's stored tag variants (not values)
+      daemon                            run the background daemon (used by the LaunchAgent — don't call directly)
+
+    examples:
+      secrets set movies MONGODB_URI environment=production app=web <<< "mongodb://prod-web..."
+      secrets set movies MONGODB_URI environment=production app=worker <<< "mongodb://prod-worker..."
+      secrets get movies MONGODB_URI environment=production app=web
+      secrets list movies MONGODB_URI
     """)
 }
 
@@ -30,6 +43,18 @@ func readStdin() -> String {
     }
     if input.hasSuffix("\n") { input.removeLast() }
     return input
+}
+
+func parseTags(_ args: [String]) -> [String: String]? {
+    var tags: [String: String] = [:]
+    for arg in args {
+        guard let eq = arg.firstIndex(of: "=") else { return nil }
+        let key = String(arg[arg.startIndex..<eq])
+        let value = String(arg[arg.index(after: eq)...])
+        guard !key.isEmpty, !value.isEmpty else { return nil }
+        tags[key] = value
+    }
+    return tags
 }
 
 func runClient(_ request: Request) {
@@ -75,31 +100,35 @@ case "daemon":
 
 case "unlock":
     guard arguments.count > 2 else { print("usage: secrets unlock NAMESPACE"); exit(1) }
-    runClient(Request(op: "unlock", namespace: arguments[2], key: nil, value: nil))
+    runClient(Request(op: "unlock", namespace: arguments[2], key: nil, value: nil, tags: nil))
 
 case "lock":
     let namespace = arguments.count > 2 ? arguments[2] : nil
-    runClient(Request(op: "lock", namespace: namespace, key: nil, value: nil))
+    runClient(Request(op: "lock", namespace: namespace, key: nil, value: nil, tags: nil))
 
 case "status":
     let namespace = arguments.count > 2 ? arguments[2] : nil
-    runClient(Request(op: "status", namespace: namespace, key: nil, value: nil))
+    runClient(Request(op: "status", namespace: namespace, key: nil, value: nil, tags: nil))
 
 case "get":
-    guard arguments.count > 3 else { print("usage: secrets get NAMESPACE KEY"); exit(1) }
-    runClient(Request(op: "get", namespace: arguments[2], key: arguments[3], value: nil))
+    guard arguments.count > 3 else { print("usage: secrets get NAMESPACE KEY [tag=value ...]"); exit(1) }
+    guard let tags = parseTags(Array(arguments[4...])) else { print("bad tag argument, expected key=value"); exit(1) }
+    runClient(Request(op: "get", namespace: arguments[2], key: arguments[3], value: nil, tags: tags))
 
 case "set":
-    guard arguments.count > 3 else { print("usage: secrets set NAMESPACE KEY   (value read from stdin)"); exit(1) }
-    runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readStdin()))
+    guard arguments.count > 3 else { print("usage: secrets set NAMESPACE KEY [tag=value ...]   (value read from stdin)"); exit(1) }
+    guard let tags = parseTags(Array(arguments[4...])) else { print("bad tag argument, expected key=value"); exit(1) }
+    runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readStdin(), tags: tags))
 
 case "delete":
-    guard arguments.count > 3 else { print("usage: secrets delete NAMESPACE KEY"); exit(1) }
-    runClient(Request(op: "delete", namespace: arguments[2], key: arguments[3], value: nil))
+    guard arguments.count > 3 else { print("usage: secrets delete NAMESPACE KEY [tag=value ...]"); exit(1) }
+    guard let tags = parseTags(Array(arguments[4...])) else { print("bad tag argument, expected key=value"); exit(1) }
+    runClient(Request(op: "delete", namespace: arguments[2], key: arguments[3], value: nil, tags: tags))
 
 case "list":
-    guard arguments.count > 2 else { print("usage: secrets list NAMESPACE"); exit(1) }
-    runClient(Request(op: "list", namespace: arguments[2], key: nil, value: nil))
+    guard arguments.count > 2 else { print("usage: secrets list NAMESPACE [KEY]"); exit(1) }
+    let key = arguments.count > 3 ? arguments[3] : nil
+    runClient(Request(op: "list", namespace: arguments[2], key: key, value: nil, tags: nil))
 
 default:
     printUsage()

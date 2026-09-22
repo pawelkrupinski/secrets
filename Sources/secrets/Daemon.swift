@@ -57,7 +57,7 @@ final class Daemon {
         case "get":
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    let value = try KeychainStore.get(namespace: namespace, key: request.key ?? "")
+                    let value = try TaggedSecrets.get(namespace: namespace, key: request.key ?? "", tags: request.tags ?? [:])
                     return Response(ok: true, value: value, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
@@ -67,8 +67,9 @@ final class Daemon {
         case "set":
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    try KeychainStore.set(namespace: namespace, key: request.key ?? "", value: request.value ?? "")
-                    log("set \(namespace)/\(request.key ?? "?")")
+                    let tags = request.tags ?? [:]
+                    try TaggedSecrets.set(namespace: namespace, key: request.key ?? "", tags: tags, value: request.value ?? "")
+                    log("set \(namespace)/\(request.key ?? "?") \(TaggedSecrets.canonicalLabel(tags))")
                     return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
@@ -78,8 +79,9 @@ final class Daemon {
         case "delete":
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    try KeychainStore.delete(namespace: namespace, key: request.key ?? "")
-                    log("deleted \(namespace)/\(request.key ?? "?")")
+                    let tags = request.tags ?? [:]
+                    try TaggedSecrets.delete(namespace: namespace, key: request.key ?? "", tags: tags)
+                    log("deleted \(namespace)/\(request.key ?? "?") \(TaggedSecrets.canonicalLabel(tags))")
                     return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
@@ -89,6 +91,10 @@ final class Daemon {
         case "list":
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
+                    if let key = request.key {
+                        let variants = try TaggedSecrets.listVariants(namespace: namespace, key: key)
+                        return Response(ok: true, value: nil, keys: variants, locked: false, error: nil)
+                    }
                     let keys = try KeychainStore.list(namespace: namespace)
                     return Response(ok: true, value: nil, keys: keys, locked: false, error: nil)
                 } catch {

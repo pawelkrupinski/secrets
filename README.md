@@ -109,6 +109,37 @@ Every command takes a namespace — one per app/project (e.g. `movies`,
 `secrets status` with no namespace lists everything currently unlocked
 for this session; `secrets lock` with no namespace locks all of them.
 
+## Tagged variants
+
+Within a namespace, one KEY can hold several tagged variants of the same
+secret — e.g. a `MONGODB_URI` that differs per `environment`/`app`. Storage
+stays a single Keychain item per key either way: the first time a key gets
+a tagged `set`, its value becomes a small JSON envelope
+(`{"secretsVaultVariants": true, "variants": [...]}`) holding one
+`{tags, value}` pair per variant instead of a plain string. Every key set
+before this feature, or that's never used tags, stays a plain string
+untouched — `get`/`set` handle both shapes transparently, so nothing needed
+migrating.
+
+Resolution rule for `get`: if a key has exactly **one** variant, it's
+returned no matter what tags were (or weren't) asked for — no reason to
+force tag-typing when there's nothing to disambiguate. Once a key has
+**two or more** variants, `get` requires an exact tag match and fails
+loudly (listing what *is* available) rather than guessing — silently
+returning the wrong environment's or app's credential is the actual
+failure mode tags exist to prevent.
+
+```sh
+secrets set movies MONGODB_URI environment=production app=web    <<< "mongodb://prod-web..."
+secrets set movies MONGODB_URI environment=production app=worker <<< "mongodb://prod-worker..."
+secrets get movies MONGODB_URI environment=production app=web    # exact match required now
+secrets get movies MONGODB_URI                                   # error: ambiguous, lists both
+secrets list movies MONGODB_URI                                  # variant labels, never values:
+                                                                   #   app=web,environment=production
+                                                                   #   app=worker,environment=production
+secrets delete movies MONGODB_URI environment=production app=web # removes just that one variant
+```
+
 ## Usage
 
 ```sh
