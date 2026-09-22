@@ -21,31 +21,20 @@ enum KeychainError: Error, CustomStringConvertible {
 /// apps/projects (e.g. `movies`, `bitcashier`) land in genuinely separate
 /// buckets, not just separate labels within one bucket.
 ///
-/// `SecItemAdd` on its own does NOT restrict which app can read an item back —
-/// that turned out to be a real gap here: `security find-generic-password -w`
-/// could read a value straight out of Keychain, completely bypassing the
-/// daemon's Touch ID gate. The fix is to attach an explicit access-control
-/// list at creation time that trusts only the current process (the daemon),
-/// via the legacy `SecAccess`/`SecTrustedApplication` API — still functional
-/// for the classic file-based login keychain these items land in.
+/// No per-item `SecAccess` ACL is attached. An earlier version tried
+/// restricting each item to "only this compiled binary" via the legacy
+/// `SecAccess`/`SecTrustedApplication` API, but that ACL is keyed to the
+/// binary's exact ad-hoc code signature — which has no stable identity
+/// across rebuilds — so every rebuild orphaned every existing item's trust
+/// and macOS re-prompted for a password, once per item, on next access.
+/// With 80+ items that's unusable, and this tool gets rebuilt often. The
+/// daemon's own Touch ID + session-pinning gate (see Daemon.swift) is the
+/// actual security boundary; this ACL was a secondary layer against another
+/// process on the same macOS account reading Keychain directly, and it
+/// isn't workable to maintain against a tool under active iteration.
 struct KeychainStore {
     static func service(for namespace: String) -> String {
         "dev.pawel.secrets.\(namespace)"
-    }
-
-    private static func trustedToThisProcessOnly() throws -> SecAccess {
-        var trustedApp: SecTrustedApplication?
-        // path: nil means "the current process's own executable".
-        let appStatus = SecTrustedApplicationCreateFromPath(nil, &trustedApp)
-        guard appStatus == errSecSuccess, let app = trustedApp else {
-            throw KeychainError.unhandled(appStatus)
-        }
-        var access: SecAccess?
-        let accessStatus = SecAccessCreate("dev.pawel.secretsd" as CFString, [app] as CFArray, &access)
-        guard accessStatus == errSecSuccess, let result = access else {
-            throw KeychainError.unhandled(accessStatus)
-        }
-        return result
     }
 
     static func set(namespace: String, key: String, value: String) throws {
@@ -60,7 +49,6 @@ struct KeychainStore {
             var addQuery = query
             addQuery[kSecValueData as String] = data
             addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            addQuery[kSecAttrAccess as String] = try trustedToThisProcessOnly()
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
                 throw KeychainError.unhandled(addStatus)

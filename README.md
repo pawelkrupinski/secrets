@@ -42,12 +42,20 @@ descendants), for as long as that process stays alive.
 
 - **Storage**: each secret is a `kSecClassGenericPassword` Keychain item,
   `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (never synced, requires
-  the Mac to be unlocked at all), one Keychain *service* per namespace. On
-  top of that, each item carries an explicit `SecAccess` ACL trusting only
-  this compiled `secrets` binary — added after testing showed `SecItemAdd`
-  alone does **not** restrict readers: `security find-generic-password -w`
-  could pull the raw value straight out of Keychain with no prompt at all,
-  completely bypassing the daemon. The ACL is what actually closes that.
+  the Mac to be unlocked at all), one Keychain *service* per namespace. No
+  per-item `SecAccess` ACL restricts *which app* can read it — a version of
+  this tool tried that (trusting only the compiled `secrets` binary,
+  because plain `SecItemAdd` leaves items readable by any same-user process
+  via `security find-generic-password -w`), but that ACL is keyed to the
+  binary's exact ad-hoc code signature, which has no stable identity across
+  rebuilds. Every rebuild orphaned every existing item's trust and macOS
+  re-prompted for the login password once per item on next access — with
+  80+ items, unusable, and this tool gets rebuilt often. Dropped. The
+  daemon's own gate below is the actual security boundary; a raw
+  `security find-generic-password -w` by another same-user process can
+  still read a value directly, same as any other same-user Keychain access
+  — that's the accepted same-user trust boundary here (see Caveats below),
+  not a gap this tool tries to close.
 - **The daemon's own gate**: the daemon tracks, per session anchor (see
   below), which namespaces it separately unlocked with Touch ID. Every
   `get`/`set`/`delete`/`list` request re-derives the caller's anchor and
@@ -193,14 +201,22 @@ the secrets gone too.
 
 ## Caveats / things to know
 
-- **Rebuilding the binary**: the `SecAccess` ACL on each item is tied to
-  the binary's code signature. This binary is only ad-hoc self-signed (no
-  Developer ID), so rebuilding it changes that signature. If you edit the
-  code and reinstall, the *first* keychain access afterwards may trigger a
-  one-time macOS "`secrets` wants to access your keychain" password
-  prompt — click **Always Allow**. One-time nuisance per rebuild, not a
-  security issue. (Existing items keep the ACL they were created with;
-  only a rebuild invalidates it, not a restart.)
+- **Same-user trust boundary**: there's no per-item Keychain ACL (see why
+  above), so this is an ssh-agent/gpg-agent-style model — the boundary is
+  "your macOS user account," not "only this specific binary." Any process
+  running as you can read a Keychain item's raw bytes directly via
+  `security find-generic-password -w` if it knows the service/account
+  names, same as it always could for any of your other Keychain items.
+  What the daemon actually adds on top is the Touch ID gate and
+  session/namespace pinning for the *intended* path (`secrets get`) — it
+  doesn't and can't stop a determined same-user process from going around
+  it via raw Keychain APIs. Accepted, not a bug: this matches the model the
+  session-anchor design already assumes elsewhere (e.g. the Unix socket is
+  only permission-gated by same-user, not per-process).
+- **Rebuilding the binary**: no longer a concern for Keychain trust (no
+  per-item ACL to invalidate). A rebuild does restart the daemon (via
+  `install.sh`), which resets *all* sessions to locked — that's the normal
+  "fresh unlock needed" case, not a permission prompt.
 - **Touch ID vs password fallback**: the daemon asks for
   `.deviceOwnerAuthenticationWithBiometrics` first; if Touch ID hardware
   is unavailable (e.g. an external display in clamshell mode) it falls
