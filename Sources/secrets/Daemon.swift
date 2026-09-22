@@ -6,13 +6,22 @@ func log(_ message: String) {
     FileHandle.standardError.write("[\(timestamp)] \(message)\n".data(using: .utf8)!)
 }
 
-/// Holds the one piece of runtime state that matters: which single process
-/// (a specific Claude Code session, or a specific bare shell) is currently
-/// authorized, if any. Touch ID unlocks that one anchor; every other caller —
-/// including a *different* Claude Code window/tab — stays locked until it
-/// completes its own Touch ID prompt.
+/// Namespace names double as Keychain service-name suffixes, so keep them to
+/// a conservative charset — no "/", spaces, or anything that would make two
+/// different-looking namespaces collide.
+func isValidNamespace(_ namespace: String) -> Bool {
+    guard !namespace.isEmpty, namespace.count <= 64 else { return false }
+    return namespace.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+}
+
+/// Holds the runtime state that matters: for each authorized process
+/// ("session anchor" — a specific Claude Code session, or a specific bare
+/// shell), which namespaces it has separately unlocked with Touch ID.
+/// Unlocking `movies` never authorizes `bitcashier`, even for the exact same
+/// session — each namespace is its own Touch ID grant, since an agent is
+/// never meant to be working across both at once.
 final class Daemon {
-    private var trustedAnchor: SessionAnchor?
+    private var authorizedNamespaces: [SessionAnchor: Set<String>] = [:]
     private let queue = DispatchQueue(label: "dev.pawel.secrets.daemon")
 
     func handle(_ request: Request, peerPID: pid_t) -> Response {
@@ -20,78 +29,103 @@ final class Daemon {
 
         switch request.op {
         case "unlock":
-            return unlock(anchor: anchor)
+            guard let namespace = request.namespace, isValidNamespace(namespace) else {
+                return Response(ok: false, value: nil, keys: nil, locked: true,
+                                 error: "unlock requires a namespace, e.g. `secrets unlock movies`")
+            }
+            return unlock(anchor: anchor, namespace: namespace)
+
         case "lock":
-            queue.sync { trustedAnchor = nil }
-            log("locked")
+            queue.sync {
+                guard let anchor else { return }
+                if let namespace = request.namespace {
+                    authorizedNamespaces[anchor]?.remove(namespace)
+                } else {
+                    authorizedNamespaces[anchor] = nil
+                }
+            }
+            log("locked \(request.namespace ?? "(all namespaces)")")
             return Response(ok: true, value: nil, keys: nil, locked: true, error: nil)
+
         case "status":
-            let isUnlocked = queue.sync { isCallerAuthorized(anchor) }
-            return Response(ok: true, value: nil, keys: nil, locked: !isUnlocked, error: nil)
+            let unlocked = queue.sync { liveNamespaces(for: anchor) }
+            if let namespace = request.namespace {
+                return Response(ok: true, value: nil, keys: nil, locked: !unlocked.contains(namespace), error: nil)
+            }
+            return Response(ok: true, value: nil, keys: unlocked.sorted(), locked: unlocked.isEmpty, error: nil)
+
         case "get":
-            return requireUnlocked(anchor) {
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    let value = try KeychainStore.get(key: request.key ?? "")
+                    let value = try KeychainStore.get(namespace: namespace, key: request.key ?? "")
                     return Response(ok: true, value: value, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
                 }
             }
+
         case "set":
-            return requireUnlocked(anchor) {
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    try KeychainStore.set(key: request.key ?? "", value: request.value ?? "")
-                    log("set \(request.key ?? "?")")
+                    try KeychainStore.set(namespace: namespace, key: request.key ?? "", value: request.value ?? "")
+                    log("set \(namespace)/\(request.key ?? "?")")
                     return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
                 }
             }
+
         case "delete":
-            return requireUnlocked(anchor) {
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    try KeychainStore.delete(key: request.key ?? "")
-                    log("deleted \(request.key ?? "?")")
+                    try KeychainStore.delete(namespace: namespace, key: request.key ?? "")
+                    log("deleted \(namespace)/\(request.key ?? "?")")
                     return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
                 }
             }
+
         case "list":
-            return requireUnlocked(anchor) {
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
-                    let keys = try KeychainStore.list()
+                    let keys = try KeychainStore.list(namespace: namespace)
                     return Response(ok: true, value: nil, keys: keys, locked: false, error: nil)
                 } catch {
                     return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
                 }
             }
+
         default:
             return Response(ok: false, value: nil, keys: nil, locked: nil, error: "unknown op \(request.op)")
         }
     }
 
-    /// Must be called while holding `queue`, or from a context where a stale
-    /// read is acceptable (status/requireUnlocked both re-check on `queue`).
-    private func isCallerAuthorized(_ anchor: SessionAnchor?) -> Bool {
-        guard let trustedAnchor, let anchor else { return false }
-        guard trustedAnchor == anchor else { return false }
-        guard ProcessAncestry.isAnchorStillValid(trustedAnchor) else {
-            self.trustedAnchor = nil
-            return false
+    /// Must be called on `queue`. Drops the anchor's whole entry if its pinned
+    /// process has died (or been reused by something else), rather than
+    /// silently leaking permission to a lucky new process at the same pid.
+    private func liveNamespaces(for anchor: SessionAnchor?) -> Set<String> {
+        guard let anchor, let namespaces = authorizedNamespaces[anchor] else { return [] }
+        guard ProcessAncestry.isAnchorStillValid(anchor) else {
+            authorizedNamespaces[anchor] = nil
+            return []
         }
-        return true
+        return namespaces
     }
 
-    private func requireUnlocked(_ anchor: SessionAnchor?, _ body: () -> Response) -> Response {
-        let authorized = queue.sync { isCallerAuthorized(anchor) }
-        guard authorized else {
-            return Response(ok: false, value: nil, keys: nil, locked: true, error: "locked — run `secrets unlock`")
+    private func requireUnlocked(_ anchor: SessionAnchor?, namespace: String?, _ body: (String) -> Response) -> Response {
+        guard let namespace, isValidNamespace(namespace) else {
+            return Response(ok: false, value: nil, keys: nil, locked: true, error: "missing or invalid namespace")
         }
-        return body()
+        let isUnlocked = queue.sync { liveNamespaces(for: anchor).contains(namespace) }
+        guard isUnlocked else {
+            return Response(ok: false, value: nil, keys: nil, locked: true,
+                             error: "locked — run `secrets unlock \(namespace)`")
+        }
+        return body(namespace)
     }
 
-    private func unlock(anchor: SessionAnchor?) -> Response {
+    private func unlock(anchor: SessionAnchor?, namespace: String) -> Response {
         guard let anchor else {
             return Response(ok: false, value: nil, keys: nil, locked: true, error: "could not identify caller process")
         }
@@ -107,7 +141,7 @@ final class Daemon {
             }
         }
 
-        let reason = "Unlock the secrets store for \((anchor.path as NSString).lastPathComponent) (pid \(anchor.pid))"
+        let reason = "Unlock the '\(namespace)' secrets for \((anchor.path as NSString).lastPathComponent) (pid \(anchor.pid))"
         let semaphore = DispatchSemaphore(value: 0)
         var success = false
         var failureReason: String?
@@ -119,11 +153,11 @@ final class Daemon {
         semaphore.wait()
 
         if success {
-            queue.sync { trustedAnchor = anchor }
-            log("unlocked for pid \(anchor.pid) (\(anchor.path))")
+            queue.sync { _ = authorizedNamespaces[anchor, default: []].insert(namespace) }
+            log("unlocked namespace '\(namespace)' for pid \(anchor.pid) (\(anchor.path))")
             return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
         } else {
-            log("unlock failed: \(failureReason ?? "unknown")")
+            log("unlock of '\(namespace)' failed: \(failureReason ?? "unknown")")
             return Response(ok: false, value: nil, keys: nil, locked: true, error: failureReason ?? "authentication failed")
         }
     }

@@ -4,7 +4,7 @@ import Foundation
 /// Identifies the process that should be trusted for a given socket connection,
 /// so the daemon can pin an unlock to one specific Claude Code session (or one
 /// bare terminal shell) instead of trusting every process the Mac user owns.
-struct SessionAnchor: Equatable {
+struct SessionAnchor: Hashable {
     let pid: pid_t
     let path: String
 }

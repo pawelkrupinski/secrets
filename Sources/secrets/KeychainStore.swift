@@ -16,7 +16,10 @@ enum KeychainError: Error, CustomStringConvertible {
     }
 }
 
-/// Stores each secret as its own generic-password item under one service name.
+/// Stores each secret as its own generic-password item, one Keychain
+/// *service* per namespace (`dev.pawel.secrets.<namespace>`) so different
+/// apps/projects (e.g. `movies`, `bitcashier`) land in genuinely separate
+/// buckets, not just separate labels within one bucket.
 ///
 /// `SecItemAdd` on its own does NOT restrict which app can read an item back —
 /// that turned out to be a real gap here: `security find-generic-password -w`
@@ -26,7 +29,9 @@ enum KeychainError: Error, CustomStringConvertible {
 /// via the legacy `SecAccess`/`SecTrustedApplication` API — still functional
 /// for the classic file-based login keychain these items land in.
 struct KeychainStore {
-    static let service = "dev.pawel.secrets"
+    static func service(for namespace: String) -> String {
+        "dev.pawel.secrets.\(namespace)"
+    }
 
     private static func trustedToThisProcessOnly() throws -> SecAccess {
         var trustedApp: SecTrustedApplication?
@@ -43,11 +48,11 @@ struct KeychainStore {
         return result
     }
 
-    static func set(key: String, value: String) throws {
+    static func set(namespace: String, key: String, value: String) throws {
         let data = Data(value.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service(for: namespace),
             kSecAttrAccount as String: key
         ]
         let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
@@ -65,10 +70,10 @@ struct KeychainStore {
         }
     }
 
-    static func get(key: String) throws -> String {
+    static func get(namespace: String, key: String) throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service(for: namespace),
             kSecAttrAccount as String: key,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
@@ -84,10 +89,10 @@ struct KeychainStore {
         return value
     }
 
-    static func delete(key: String) throws {
+    static func delete(namespace: String, key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service(for: namespace),
             kSecAttrAccount as String: key
         ]
         let status = SecItemDelete(query as CFDictionary)
@@ -96,10 +101,10 @@ struct KeychainStore {
         }
     }
 
-    static func list() throws -> [String] {
+    static func list(namespace: String) throws -> [String] {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: service(for: namespace),
             kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitAll
         ]

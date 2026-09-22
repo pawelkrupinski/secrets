@@ -5,17 +5,21 @@ let socketPath = socketDir + "/secrets.sock"
 
 func printUsage() {
     print("""
-    usage: secrets <command> [args]
+    usage: secrets <command> <namespace> [args]
+
+    Namespaces scope both the Keychain storage and the Touch ID grant —
+    unlocking "movies" never authorizes "bitcashier", even in the same
+    session. Pick one namespace per app/project (e.g. "movies", "bitcashier").
 
     commands:
-      unlock       authorize this session with Touch ID (or password fallback)
-      lock         end the authorized session
-      status       show whether the store is locked or unlocked for this caller
-      get KEY      print the secret value for KEY
-      set KEY      store KEY, reading its value from stdin
-      delete KEY   remove KEY
-      list         list stored key names (not values)
-      daemon       run the background daemon (used by the LaunchAgent — don't call directly)
+      unlock NAMESPACE          authorize this session for NAMESPACE with Touch ID
+      lock [NAMESPACE]          end authorization for NAMESPACE, or all namespaces if omitted
+      status [NAMESPACE]        show unlocked namespaces, or whether one is unlocked
+      get NAMESPACE KEY         print the secret value for KEY
+      set NAMESPACE KEY         store KEY, reading its value from stdin
+      delete NAMESPACE KEY      remove KEY
+      list NAMESPACE            list stored key names in NAMESPACE (not values)
+      daemon                    run the background daemon (used by the LaunchAgent — don't call directly)
     """)
 }
 
@@ -41,7 +45,12 @@ func runClient(_ request: Request) {
         case "list":
             for key in response.keys ?? [] { print(key) }
         case "status":
-            print((response.locked ?? true) ? "locked" : "unlocked")
+            if request.namespace != nil {
+                print((response.locked ?? true) ? "locked" : "unlocked")
+            } else {
+                let unlocked = response.keys ?? []
+                print(unlocked.isEmpty ? "locked (no namespaces unlocked)" : "unlocked: " + unlocked.joined(separator: ", "))
+            }
         default:
             print("ok")
         }
@@ -65,28 +74,32 @@ case "daemon":
     try server.run()
 
 case "unlock":
-    runClient(Request(op: "unlock", key: nil, value: nil))
+    guard arguments.count > 2 else { print("usage: secrets unlock NAMESPACE"); exit(1) }
+    runClient(Request(op: "unlock", namespace: arguments[2], key: nil, value: nil))
 
 case "lock":
-    runClient(Request(op: "lock", key: nil, value: nil))
+    let namespace = arguments.count > 2 ? arguments[2] : nil
+    runClient(Request(op: "lock", namespace: namespace, key: nil, value: nil))
 
 case "status":
-    runClient(Request(op: "status", key: nil, value: nil))
+    let namespace = arguments.count > 2 ? arguments[2] : nil
+    runClient(Request(op: "status", namespace: namespace, key: nil, value: nil))
 
 case "get":
-    guard arguments.count > 2 else { print("usage: secrets get KEY"); exit(1) }
-    runClient(Request(op: "get", key: arguments[2], value: nil))
+    guard arguments.count > 3 else { print("usage: secrets get NAMESPACE KEY"); exit(1) }
+    runClient(Request(op: "get", namespace: arguments[2], key: arguments[3], value: nil))
 
 case "set":
-    guard arguments.count > 2 else { print("usage: secrets set KEY   (value read from stdin)"); exit(1) }
-    runClient(Request(op: "set", key: arguments[2], value: readStdin()))
+    guard arguments.count > 3 else { print("usage: secrets set NAMESPACE KEY   (value read from stdin)"); exit(1) }
+    runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readStdin()))
 
 case "delete":
-    guard arguments.count > 2 else { print("usage: secrets delete KEY"); exit(1) }
-    runClient(Request(op: "delete", key: arguments[2], value: nil))
+    guard arguments.count > 3 else { print("usage: secrets delete NAMESPACE KEY"); exit(1) }
+    runClient(Request(op: "delete", namespace: arguments[2], key: arguments[3], value: nil))
 
 case "list":
-    runClient(Request(op: "list", key: nil, value: nil))
+    guard arguments.count > 2 else { print("usage: secrets list NAMESPACE"); exit(1) }
+    runClient(Request(op: "list", namespace: arguments[2], key: nil, value: nil))
 
 default:
     printUsage()

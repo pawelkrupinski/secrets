@@ -2,6 +2,7 @@ import Foundation
 
 struct Request: Codable {
     let op: String
+    let namespace: String?
     let key: String?
     let value: String?
 }

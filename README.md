@@ -23,53 +23,58 @@ descendants), for as long as that process stays alive.
 
 ```
  Claude Code (pid 90522, "claude")
-   └─ Bash tool spawns: zsh -c "secrets get TMDB_API_KEY"
+   └─ Bash tool spawns: zsh -c "secrets get movies TMDB_API_KEY"
         └─ secrets (CLI, connects to Unix socket)
              │  JSON line over
              │  ~/Library/Application Support/secrets/secrets.sock
              ▼
         secretsd (daemon, LaunchAgent, always running)
              │  1. reads the peer pid off the socket (LOCAL_PEERPID)
-             │  2. walks the parent-pid chain looking for a `claude`
-             │     ancestor (or falls back to the immediate parent shell)
-             │  3. compares that "session anchor" against whichever one
-             │     was pinned by the last successful `unlock`
+             │  2. walks the parent-pid chain looking for a Claude Code
+             │     process (or falls back to the immediate parent shell)
+             │  3. checks whether that "session anchor" has separately
+             │     unlocked the "movies" namespace
              ▼
-        Keychain (service "dev.pawel.secrets", one item per key)
+        Keychain (service "dev.pawel.secrets.movies", one item per key)
 ```
 
 ### The security model
 
 - **Storage**: each secret is a `kSecClassGenericPassword` Keychain item,
   `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (never synced, requires
-  the Mac to be unlocked at all). Only the `secrets` binary that created
-  an item can read it without an extra macOS keychain-access dialog — this
-  is the default ACL Keychain gives the creating app, no extra code needed.
-- **The daemon's own gate**: on top of that, the daemon tracks a single
-  `trustedAnchor` — the pid + executable path of whichever process's
-  ancestry successfully completed a Touch ID prompt. Every `get`/`set`/
-  `delete`/`list` request re-derives the caller's anchor and only serves
-  the request if it's the *same* anchor, re-verified against a live
-  `proc_pidpath` lookup each time (so a later, unrelated process reusing
-  that pid can't inherit trust).
+  the Mac to be unlocked at all), one Keychain *service* per namespace. On
+  top of that, each item carries an explicit `SecAccess` ACL trusting only
+  this compiled `secrets` binary — added after testing showed `SecItemAdd`
+  alone does **not** restrict readers: `security find-generic-password -w`
+  could pull the raw value straight out of Keychain with no prompt at all,
+  completely bypassing the daemon. The ACL is what actually closes that.
+- **The daemon's own gate**: the daemon tracks, per session anchor (see
+  below), which namespaces it separately unlocked with Touch ID. Every
+  `get`/`set`/`delete`/`list` request re-derives the caller's anchor and
+  only serves the request if that anchor has that *specific namespace*
+  unlocked — re-verified against a live `proc_pidpath` lookup each time,
+  so a later, unrelated process reusing the same pid can't inherit trust.
 - **Session pinning, not machine-wide unlock**: unlocking from inside a
-  Claude Code conversation pins trust to *that* `claude` process. A
+  Claude Code conversation pins trust to *that* Claude Code process. A
   different Claude Code window/tab, a different IDE-embedded Claude
   session, or any other app on your Mac is a different anchor and gets
   `locked` — it has to complete its own Touch ID prompt. Running `secrets
   unlock` from a bare terminal (no Claude ancestor) pins to that shell
   instead, so manual use works the same way.
+- **Namespace pinning**: unlocking is per (session anchor, namespace) —
+  unlocking `movies` for a session never authorizes `bitcashier` for that
+  same session. Each app/project gets its own Touch ID grant.
 - **Self-locking**: there's no explicit TTL. Trust lasts exactly as long
   as the pinned process stays alive — close that Claude Code conversation
   (or terminal) and the next `get` from anywhere fails closed, requiring
-  a fresh Touch ID prompt. `secrets lock` ends it early on demand.
+  a fresh Touch ID prompt. `secrets lock [namespace]` ends it early on demand.
 - **What this does *not* protect against**: anything already running
   inside the trusted process's own descendants during the unlocked window
-  (e.g. another Bash tool call in the *same* Claude conversation) is, by
-  design, allowed — that's the whole point of "authorize this session."
-  It also doesn't protect against another process that has already
-  compromised the same macOS user account and can inject itself as a
-  child of the trusted `claude` pid.
+  (e.g. another Bash tool call in the *same* Claude conversation, for the
+  *same* namespace) is, by design, allowed — that's the whole point of
+  "authorize this session for this namespace." It also doesn't protect
+  against another process that has already compromised the same macOS
+  user account and can inject itself as a child of the trusted pid.
 
 ## Setup
 
@@ -87,16 +92,35 @@ with `launchctl` so the daemon starts now and on every login. It starts
 
 Make sure `~/.local/bin` is on your `PATH`.
 
+## Namespaces
+
+Every command takes a namespace — one per app/project (e.g. `movies`,
+`bitcashier`). Namespaces are a real security boundary, not just labels:
+
+- Each namespace is its own Keychain service
+  (`dev.pawel.secrets.<namespace>`) — separate storage buckets.
+- Each namespace is its own Touch ID grant. Unlocking `movies` does
+  **not** authorize `bitcashier`, even for the exact same session pin —
+  you unlock each namespace you need, separately. This matches how an
+  agent actually works: it's on one project at a time, so there's no
+  reason a `movies` task should ever be able to read `bitcashier` secrets
+  just because they happen to run in the same Claude Code conversation.
+
+`secrets status` with no namespace lists everything currently unlocked
+for this session; `secrets lock` with no namespace locks all of them.
+
 ## Usage
 
 ```sh
-secrets unlock          # Touch ID prompt; authorizes this session
-secrets status          # "locked" or "unlocked" (for the calling session)
-secrets set TMDB_API_KEY   <<< "abc123"     # value read from stdin
-secrets get TMDB_API_KEY                    # prints the raw value
-secrets list             # key names only, never values
-secrets delete TMDB_API_KEY
-secrets lock             # end this session's authorization early
+secrets unlock movies                        # Touch ID prompt; authorizes this session for "movies" only
+secrets status                                # lists which namespaces are unlocked for this session
+secrets status movies                         # "locked" or "unlocked", for just that namespace
+secrets set movies TMDB_API_KEY   <<< "abc123"   # value read from stdin
+secrets get movies TMDB_API_KEY                  # prints the raw value
+secrets list movies              # key names only, never values
+secrets delete movies TMDB_API_KEY
+secrets lock movies              # end authorization for just "movies"
+secrets lock                     # end authorization for every namespace
 ```
 
 `set` reads the value from stdin rather than argv, so it never shows up
@@ -104,7 +128,7 @@ in `ps`/shell history the way a literal `secrets set KEY value` would.
 Prefer a heredoc or pipe:
 
 ```sh
-secrets set OMDB_API_KEY <<'EOF'
+secrets set movies OMDB_API_KEY <<'EOF'
 your-real-key-here
 EOF
 ```
@@ -118,7 +142,7 @@ subsequent Bash tool call Claude makes in *that same conversation* can
 do:
 
 ```sh
-secrets get TMDB_API_KEY
+secrets get movies TMDB_API_KEY
 ```
 
 and get the value back directly, with no further prompting, because
@@ -133,17 +157,19 @@ authorized.
 
 Removes the LaunchAgent, the daemon, and the CLI binary. Leaves the
 Keychain items in place — delete them yourself via Keychain Access.app
-(search for service `dev.pawel.secrets`) if you want the secrets gone too.
+(search for service names starting with `dev.pawel.secrets.`) if you want
+the secrets gone too.
 
 ## Caveats / things to know
 
-- **Rebuilding the binary**: macOS's Keychain ACL for "which app created
-  this item" is tied to the binary's code signature. This binary is only
-  ad-hoc self-signed (no Developer ID), so rebuilding it changes that
-  signature. If you edit the code and reinstall, the *first* keychain
-  access afterwards may trigger a one-time macOS "`secrets` wants to
-  access your keychain" password prompt — click **Always Allow**. This
-  is a one-time nuisance per rebuild, not a security issue.
+- **Rebuilding the binary**: the `SecAccess` ACL on each item is tied to
+  the binary's code signature. This binary is only ad-hoc self-signed (no
+  Developer ID), so rebuilding it changes that signature. If you edit the
+  code and reinstall, the *first* keychain access afterwards may trigger a
+  one-time macOS "`secrets` wants to access your keychain" password
+  prompt — click **Always Allow**. One-time nuisance per rebuild, not a
+  security issue. (Existing items keep the ACL they were created with;
+  only a rebuild invalidates it, not a restart.)
 - **Touch ID vs password fallback**: the daemon asks for
   `.deviceOwnerAuthenticationWithBiometrics` first; if Touch ID hardware
   is unavailable (e.g. an external display in clamshell mode) it falls
@@ -152,7 +178,7 @@ Keychain items in place — delete them yourself via Keychain Access.app
 - **"All Claude sessions" instead of one**: if you'd rather any Claude
   Code process be trusted after one unlock (looser, more convenient,
   slightly less isolation between concurrent sessions), change
-  `isCallerAuthorized` in `Daemon.swift` to compare `anchor.path` (or just
-  "is there a `claude` ancestor at all") instead of pinning the exact pid.
-  Not implemented by default — the pinned-session behavior above is the
+  `liveNamespaces` in `Daemon.swift` to compare `anchor.path` (or just "is
+  there a Claude Code ancestor at all") instead of the exact pid. Not
+  implemented by default — the pinned-session behavior above is the
   default.
