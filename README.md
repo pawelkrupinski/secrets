@@ -84,7 +84,13 @@ descendants), for as long as that process stays alive.
 - **The unlock prompt names the requester**: any local process can *ask*
   for an unlock and hope you approve reflexively. The Touch ID dialog shows
   the exact requesting executable path and pid, so only approve one when
-  you just ran `secrets unlock` yourself and it names what you expect.
+  you just ran `secrets unlock` yourself and it names what you expect. Only
+  one prompt can be open at a time — further `unlock` requests are refused
+  until it's answered — so a process can't stack up dialogs to wear you
+  down. `secrets lock-all` clears every session's unlocks from anywhere
+  (locking only removes access, so it's safe for any caller to have).
+- **Typed input is hidden**: `secrets set` reading from a terminal turns
+  off echo, so the value isn't on screen or in scrollback.
 - **Daemon hardening against local misuse**: `SIGPIPE` is ignored (a client
   that disconnects before reading its reply used to kill the daemon and wipe
   every session's unlock — any local process could do that on purpose);
@@ -176,7 +182,8 @@ secrets get movies TMDB_API_KEY                  # prints the raw value
 secrets list movies              # key names only, never values
 secrets delete movies TMDB_API_KEY
 secrets lock movies              # end authorization for just "movies"
-secrets lock                     # end authorization for every namespace
+secrets lock                     # end authorization for every namespace (this session)
+secrets lock-all                 # panic switch: clear EVERY session's unlocks, from any terminal
 ```
 
 `set` reads the value from stdin rather than argv, so it never shows up

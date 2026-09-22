@@ -20,6 +20,7 @@ func printUsage() {
     commands:
       unlock NAMESPACE                 authorize this session for NAMESPACE with Touch ID
       lock [NAMESPACE]                 end authorization for NAMESPACE, or all namespaces if omitted
+      lock-all                         panic switch: clear EVERY session's unlocks, from anywhere
       status [NAMESPACE]               show unlocked namespaces, or whether one is unlocked
       get NAMESPACE KEY [tag=value...] print the secret value for KEY (untagged, or the matching tagged variant)
       set NAMESPACE KEY [tag=value...] store KEY, reading its value from stdin
@@ -45,6 +46,24 @@ func readStdin() -> String {
     }
     if input.hasSuffix("\n") { input.removeLast() }
     return input
+}
+
+/// A secret typed at an interactive terminal must not echo to the screen
+/// (shoulder-surfing, scrollback, terminal session recordings). Piped or
+/// heredoc input isn't a tty and is read as-is.
+func readSecretFromStdin() -> String {
+    guard isatty(0) != 0 else { return readStdin() }
+    var original = termios()
+    tcgetattr(0, &original)
+    var quiet = original
+    quiet.c_lflag &= ~tcflag_t(ECHO)
+    tcsetattr(0, TCSANOW, &quiet)
+    defer {
+        tcsetattr(0, TCSANOW, &original)
+        FileHandle.standardError.write("\n".data(using: .utf8)!)
+    }
+    FileHandle.standardError.write("Enter value (input hidden; press Enter, then Ctrl-D): ".data(using: .utf8)!)
+    return readStdin()
 }
 
 func parseTags(_ args: [String]) -> [String: String]? {
@@ -110,6 +129,9 @@ case "lock":
     let namespace = arguments.count > 2 ? arguments[2] : nil
     runClient(Request(op: "lock", namespace: namespace, key: nil, value: nil, tags: nil))
 
+case "lock-all":
+    runClient(Request(op: "lock-all", namespace: nil, key: nil, value: nil, tags: nil))
+
 case "status":
     let namespace = arguments.count > 2 ? arguments[2] : nil
     runClient(Request(op: "status", namespace: namespace, key: nil, value: nil, tags: nil))
@@ -122,7 +144,7 @@ case "get":
 case "set":
     guard arguments.count > 3 else { print("usage: secrets set NAMESPACE KEY [tag=value ...]   (value read from stdin)"); exit(1) }
     guard let tags = parseTags(Array(arguments[4...])) else { print("bad tag argument, expected key=value"); exit(1) }
-    runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readStdin(), tags: tags))
+    runClient(Request(op: "set", namespace: arguments[2], key: arguments[3], value: readSecretFromStdin(), tags: tags))
 
 case "describe":
     guard arguments.count > 3 else { print("usage: secrets describe NAMESPACE KEY   (description read from stdin)"); exit(1) }

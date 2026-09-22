@@ -23,6 +23,11 @@ func isValidNamespace(_ namespace: String) -> Bool {
 final class Daemon {
     private var authorizedNamespaces: [SessionAnchor: Set<String>] = [:]
     private let queue = DispatchQueue(label: "dev.pawel.secrets.daemon")
+    /// One Touch ID prompt at a time. Without this, any local process could
+    /// fire off dozens of `unlock` requests and stack up that many system
+    /// dialogs — an easy way to tire a user into approving the wrong one, and
+    /// each one pins a handler thread for as long as the prompt stays open.
+    private let unlockGate = DispatchSemaphore(value: 1)
 
     func handle(_ request: Request, peerPID: pid_t) -> Response {
         let anchor = ProcessAncestry.sessionAnchor(forPeerPID: peerPID)
@@ -45,6 +50,16 @@ final class Daemon {
                 }
             }
             log("locked \(request.namespace ?? "(all namespaces)")")
+            return Response(ok: true, value: nil, keys: nil, locked: true, error: nil)
+
+        case "lock-all":
+            // Deliberately available to ANY local caller, not just the
+            // sessions being locked: locking only ever removes access, so the
+            // worst a stranger can do with it is force a fresh Touch ID. That
+            // makes it a safe panic switch when something looks wrong and the
+            // user isn't sitting in the session that holds the unlock.
+            queue.sync { authorizedNamespaces.removeAll() }
+            log("lock-all: cleared every session's unlocks (requested by pid \(peerPID))")
             return Response(ok: true, value: nil, keys: nil, locked: true, error: nil)
 
         case "status":
@@ -156,6 +171,12 @@ final class Daemon {
         guard let anchor else {
             return Response(ok: false, value: nil, keys: nil, locked: true, error: "could not identify caller process")
         }
+
+        guard unlockGate.wait(timeout: .now()) == .success else {
+            return Response(ok: false, value: nil, keys: nil, locked: true,
+                             error: "another unlock prompt is already open — answer or dismiss it first")
+        }
+        defer { unlockGate.signal() }
 
         let context = LAContext()
         var policy: LAPolicy = .deviceOwnerAuthenticationWithBiometrics
