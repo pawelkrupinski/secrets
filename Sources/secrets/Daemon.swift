@@ -125,6 +125,17 @@ final class Daemon {
                 }
             }
 
+        case "undo":
+            return requireUnlocked(anchor, namespace: request.namespace) { namespace in
+                do {
+                    try TaggedSecrets.undo(namespace: namespace, key: request.key ?? "")
+                    log("undo \(namespace)/\(request.key ?? "?")")
+                    return Response(ok: true, value: nil, keys: nil, locked: false, error: nil)
+                } catch {
+                    return Response(ok: false, value: nil, keys: nil, locked: false, error: "\(error)")
+                }
+            }
+
         case "delete":
             return requireUnlocked(anchor, namespace: request.namespace) { namespace in
                 do {
@@ -241,9 +252,12 @@ final class Daemon {
         // LocalAuthentication has its own timeout, but nothing here should
         // rest on it: a prompt that somehow never resolves would otherwise
         // hold the unlock gate — and every future unlock — until a restart.
-        if semaphore.wait(timeout: .now() + 300) == .timedOut {
+        // Kept under the client's 180s response timeout so the client always
+        // hears the daemon's verdict rather than giving up first and leaving
+        // an unlock to land after it has already reported failure.
+        if semaphore.wait(timeout: .now() + 170) == .timedOut {
             context.invalidate()
-            log("unlock of '\(namespace)' abandoned: prompt unanswered for 5 minutes")
+            log("unlock of '\(namespace)' abandoned: prompt unanswered")
             return Response(ok: false, value: nil, keys: nil, locked: true, error: "Touch ID prompt timed out")
         }
 

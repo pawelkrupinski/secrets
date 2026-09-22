@@ -25,6 +25,7 @@ func printUsage() {
       get NAMESPACE KEY [tag=value...] print the secret value for KEY (untagged, or the matching tagged variant)
       set NAMESPACE KEY [tag=value...] store KEY, reading its value from stdin
       describe NAMESPACE KEY           set/update KEY's description, reading it from stdin
+      undo NAMESPACE KEY               restore the value the last `set` overwrote (one level)
       delete NAMESPACE KEY [tag=value...]  remove KEY (untagged, or one tagged variant)
       list NAMESPACE                   list stored key names in NAMESPACE, with descriptions (not values)
       list NAMESPACE KEY                list KEY's description + stored tag variants (not values)
@@ -149,6 +150,10 @@ case "set":
 case "describe":
     guard arguments.count > 3 else { print("usage: secrets describe NAMESPACE KEY   (description read from stdin)"); exit(1) }
     runClient(Request(op: "describe", namespace: arguments[2], key: arguments[3], value: readStdin(), tags: nil))
+
+case "undo":
+    guard arguments.count > 3 else { print("usage: secrets undo NAMESPACE KEY"); exit(1) }
+    runClient(Request(op: "undo", namespace: arguments[2], key: arguments[3], value: nil, tags: nil))
 
 case "delete":
     guard arguments.count > 3 else { print("usage: secrets delete NAMESPACE KEY [tag=value ...]"); exit(1) }

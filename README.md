@@ -192,6 +192,7 @@ secrets set movies TMDB_API_KEY   <<< "abc123"   # value read from stdin
 secrets get movies TMDB_API_KEY                  # prints the raw value
 secrets list movies              # key names only, never values
 secrets delete movies TMDB_API_KEY
+secrets undo movies TMDB_API_KEY   # put back whatever the last `set` overwrote (one level)
 secrets lock movies              # end authorization for just "movies"
 secrets lock                     # end authorization for every namespace (this session)
 secrets lock-all                 # panic switch: clear EVERY session's unlocks, from any terminal
@@ -250,7 +251,22 @@ the secrets gone too.
   doesn't and can't stop a determined same-user process from going around
   it via raw Keychain APIs. Accepted, not a bug: this matches the model the
   session-anchor design already assumes elsewhere (e.g. the Unix socket is
-  only permission-gated by same-user, not per-process).
+  only permission-gated by same-user, not per-process). Be clear-eyed
+  about what the daemon-hardening items above therefore buy: a hostile
+  process running as you can simply `kill` the daemon, `launchctl bootout`
+  it, replace its binary, or read the Keychain directly — none of the
+  socket-level protections stop that. They exist against careless or
+  buggy local code, prompt-phishing, and other user accounts on the
+  machine. Closing the same-user gap properly would mean the
+  data-protection keychain (`kSecUseDataProtectionKeychain`), whose items
+  are bound to a code-signing identity and invisible to `security(1)` —
+  but that needs a real signing identity and entitlements, not an ad-hoc
+  signed CLI, so it's not done here.
+- **A mistaken overwrite is recoverable, once**: `set` on an existing
+  value keeps the overwritten variant as `previous`, and `secrets undo`
+  puts it back. Only the most recent overwrite is kept; `delete` has no
+  undo, so `delete` deliberately refuses when nothing matches rather than
+  reporting success for a no-op.
 - **Rebuilding the binary**: no longer a concern for Keychain trust (no
   per-item ACL to invalidate). A rebuild does restart the daemon (via
   `install.sh`), which resets *all* sessions to locked — that's the normal
