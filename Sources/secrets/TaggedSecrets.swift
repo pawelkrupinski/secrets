@@ -60,19 +60,23 @@ enum TaggedSecrets {
     static func get(namespace: String, key: String, tags: [String: String]) throws -> String {
         let raw = try KeychainStore.get(namespace: namespace, key: key)
         guard let envelope = decodeEnvelope(raw) else {
-            // Legacy plain value — the only variant there is, always returned.
-            return raw
-        }
-        // No ambiguity possible with exactly one variant, so it's returned
-        // regardless of whatever tags were (or weren't) asked for. Only
-        // 2+ variants force an exact tag match — that's the actual case
-        // where guessing wrong would silently hand back the wrong
-        // environment's/app's secret.
-        if envelope.variants.count == 1 {
-            return envelope.variants[0].value
+            // Legacy plain value: it IS the untagged variant. A caller that
+            // explicitly asked for tags is asking for something this key
+            // doesn't have, and must not be handed the untagged value instead.
+            if tags.isEmpty { return raw }
+            throw TaggedSecretError.noVariantForTags(available: [[:]])
         }
         if let match = envelope.variants.first(where: { $0.tags == tags }) {
             return match.value
+        }
+        // With no tags asked for and exactly one variant stored there is
+        // nothing to disambiguate, so it's returned. But tags that were asked
+        // for and don't match are never waved through, single variant or not:
+        // `get KEY environment=production` handing back the only variant —
+        // which happens to be development's — is precisely the silent
+        // wrong-environment failure tags exist to make impossible.
+        if tags.isEmpty, envelope.variants.count == 1 {
+            return envelope.variants[0].value
         }
         throw TaggedSecretError.noVariantForTags(available: envelope.variants.map { $0.tags })
     }

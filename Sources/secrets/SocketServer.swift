@@ -13,6 +13,11 @@ final class SocketServer {
     /// A client that connects and then never sends (or never reads) would
     /// otherwise pin a handler thread forever.
     private static let ioTimeoutSeconds = 30
+    /// Beyond this many simultaneous connections, new ones are closed at once.
+    /// Without a cap, a process that opens thousands and holds them exhausts
+    /// the daemon's file descriptors, after which accept() fails for real
+    /// clients too. Legitimate use is a handful at a time.
+    private let connectionSlots = DispatchSemaphore(value: 32)
 
     init(socketPath: String, daemon: Daemon) {
         self.socketPath = socketPath
@@ -52,13 +57,28 @@ final class SocketServer {
         }
         guard bindResult == 0 else { throw POSIXError(.EADDRINUSE) }
         chmod(socketPath, 0o600)
-        guard listen(listenFD, 8) == 0 else { throw POSIXError(.EIO) }
+        // Larger than the connection cap, so a burst is judged by the cap
+        // (accepted, then closed if over) rather than refused by the kernel
+        // queue before the daemon ever sees it.
+        guard listen(listenFD, 64) == 0 else { throw POSIXError(.EIO) }
         log("listening on \(socketPath)")
 
         while true {
             let clientFD = accept(listenFD, nil, nil)
-            guard clientFD >= 0 else { continue }
-            DispatchQueue.global().async { self.handleClient(clientFD) }
+            guard clientFD >= 0 else {
+                // EMFILE and friends: spinning here would peg a core while
+                // the condition persists.
+                usleep(50_000)
+                continue
+            }
+            guard connectionSlots.wait(timeout: .now()) == .success else {
+                close(clientFD)
+                continue
+            }
+            DispatchQueue.global().async {
+                defer { self.connectionSlots.signal() }
+                self.handleClient(clientFD)
+            }
         }
     }
 
@@ -106,8 +126,20 @@ final class SocketServer {
     private func writeLine(fd: Int32, _ string: String) {
         var data = Array(string.utf8)
         data.append(0x0A)
-        data.withUnsafeBufferPointer { ptr in
-            _ = write(fd, ptr.baseAddress, ptr.count)
-        }
+        writeFully(fd, data)
     }
+}
+
+/// write(2) may stop short of the whole buffer on a socket; a response cut
+/// off mid-JSON would read as a malformed reply rather than an error.
+func writeFully(_ fd: Int32, _ bytes: [UInt8]) {
+    var offset = 0
+    while offset < bytes.count {
+        let written = bytes.withUnsafeBufferPointer { write(fd, $0.baseAddress! + offset, bytes.count - offset) }
+        if written <= 0 { return }
+        offset += written
+    }
+}
+
+extension SocketServer {
 }

@@ -13,6 +13,11 @@ cd "$REPO_DIR"
 swift build -c release
 
 mkdir -p "$BIN_DIR" "$LOG_DIR" "$LAUNCH_AGENTS_DIR"
+
+# Stop the daemon BEFORE replacing the executable it's running from: overwriting
+# a mapped binary in place can crash the running process, and a crash here
+# would be mistaken for a bug in the new build.
+launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
 cp "$REPO_DIR/.build/release/secrets" "$BIN_DIR/secrets"
 chmod 755 "$BIN_DIR/secrets"
 
@@ -26,7 +31,6 @@ chmod 600 "$LOG_DIR"/secretsd.*.log
 sed -e "s|__BIN_PATH__|$BIN_DIR/secrets|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$REPO_DIR/LaunchAgents/$LABEL.plist" > "$PLIST_PATH"
 
-launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 
 echo

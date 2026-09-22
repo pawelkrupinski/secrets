@@ -48,9 +48,9 @@ func sendRequest(_ request: Request, socketPath: String) throws -> Response {
     }
     guard connectResult == 0 else { throw ClientError.connectFailed }
 
-    var reqBytes = try JSONEncoder().encode(request)
+    var reqBytes = Array(try JSONEncoder().encode(request))
     reqBytes.append(0x0A)
-    _ = reqBytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    writeFully(fd, reqBytes)
 
     var buffer = [UInt8]()
     var byte: UInt8 = 0

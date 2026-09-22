@@ -95,15 +95,24 @@ descendants), for as long as that process stays alive.
   that disconnects before reading its reply used to kill the daemon and wipe
   every session's unlock — any local process could do that on purpose);
   requests are capped at 4 MiB and socket I/O times out, so a client can't
-  exhaust memory or pin a handler thread; the socket is created under a
-  `077` umask (never briefly world-connectable), in a `0700` directory, and
-  the daemon log — key names and requester pids only, never values — is
-  `0600`.
+  exhaust memory or pin a handler thread; in-flight connections are capped
+  at 32 (beyond that, closed on arrival) so a process holding thousands
+  open can't exhaust the daemon's file descriptors; key names and tags are
+  refused if they contain control characters, and descriptions are
+  stripped of them on output, so nothing stored can drive the terminal
+  that `list` prints to (escape-sequence injection); the socket is created
+  under a `077` umask (never briefly world-connectable), in a `0700`
+  directory, and the daemon log — key names and requester pids only, never
+  values — is `0600`.
 - **What this does *not* protect against**: anything already running
   inside the trusted process's own descendants during the unlocked window
   (e.g. another Bash tool call in the *same* Claude conversation, for the
   *same* namespace) is, by design, allowed — that's the whole point of
-  "authorize this session for this namespace." It also doesn't protect
+  "authorize this session for this namespace." Be aware of what that
+  includes: every **MCP server** and hook Claude Code launches is a child
+  of that same `claude` process, so third-party MCP servers you've
+  configured can read whatever the session has unlocked. Unlock only the
+  namespace the task needs, and `lock` when it's done. It also doesn't protect
   against another process that has already compromised the same macOS
   user account and can inject itself as a child of the trusted pid.
 
@@ -152,13 +161,15 @@ before this feature, or that's never used tags, stays a plain string
 untouched — `get`/`set` handle both shapes transparently, so nothing needed
 migrating.
 
-Resolution rule for `get`: if a key has exactly **one** variant, it's
-returned no matter what tags were (or weren't) asked for — no reason to
-force tag-typing when there's nothing to disambiguate. Once a key has
-**two or more** variants, `get` requires an exact tag match and fails
-loudly (listing what *is* available) rather than guessing — silently
-returning the wrong environment's or app's credential is the actual
-failure mode tags exist to prevent.
+Resolution rule for `get`: tags you *ask for* must match a stored variant
+exactly, always — `get KEY environment=production` never returns anything
+but a variant tagged exactly that, even if the key's only variant is
+`environment=development`. (An earlier version waved a single variant
+through regardless of requested tags; that quietly handed back the wrong
+environment's credential, which is the one thing tags exist to prevent.)
+Asking with *no* tags returns the untagged variant, or — when a key has
+exactly one variant and nothing to disambiguate — that one. Anything else
+fails loudly, listing what *is* available, rather than guessing.
 
 ```sh
 secrets set movies MONGODB_URI environment=production app=web    <<< "mongodb://prod-web..."

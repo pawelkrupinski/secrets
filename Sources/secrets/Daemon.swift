@@ -14,6 +14,36 @@ func isValidNamespace(_ namespace: String) -> Bool {
     return namespace.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
 }
 
+/// Key names, tag keys and tag values are stored as Keychain attributes and
+/// printed straight back by `list`. A control character in one — ESC above
+/// all — would be interpreted by the terminal that prints it (CSI/OSC
+/// sequences can rewrite what's on screen, or in some terminals write the
+/// clipboard), so they're refused at the boundary.
+func hasControlCharacters(_ text: String) -> Bool {
+    text.unicodeScalars.contains { $0.value < 0x20 || (0x7F...0x9F).contains($0.value) }
+}
+
+/// Descriptions are free text and might legitimately hold a tab; everything
+/// else below 0x20, plus DEL and the C1 range, is dropped before a
+/// description is echoed to a terminal. A newline in particular would let one
+/// entry's description masquerade as another `list` line.
+func sanitizedForTerminal(_ text: String) -> String {
+    String(String.UnicodeScalarView(text.unicodeScalars.filter {
+        $0 == "\t" || !($0.value < 0x20 || (0x7F...0x9F).contains($0.value))
+    }))
+}
+
+private func invalidName(in request: Request) -> String? {
+    if let key = request.key, key.isEmpty || key.count > 256 || hasControlCharacters(key) {
+        return "invalid key name (empty, over 256 characters, or contains control characters)"
+    }
+    for (tagKey, tagValue) in request.tags ?? [:]
+    where tagKey.isEmpty || tagValue.isEmpty || hasControlCharacters(tagKey) || hasControlCharacters(tagValue) {
+        return "invalid tag (empty, or contains control characters)"
+    }
+    return nil
+}
+
 /// Holds the runtime state that matters: for each authorized process
 /// ("session anchor" — a specific Claude Code session, or a specific bare
 /// shell), which namespaces it has separately unlocked with Touch ID.
@@ -31,6 +61,10 @@ final class Daemon {
 
     func handle(_ request: Request, peerPID: pid_t) -> Response {
         let anchor = ProcessAncestry.sessionAnchor(forPeerPID: peerPID)
+
+        if let problem = invalidName(in: request) {
+            return Response(ok: false, value: nil, keys: nil, locked: nil, error: problem)
+        }
 
         switch request.op {
         case "unlock":
@@ -109,7 +143,7 @@ final class Daemon {
                     if let key = request.key {
                         var lines: [String] = []
                         if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
-                            lines.append("description: \(description)")
+                            lines.append("description: \(sanitizedForTerminal(description))")
                         }
                         lines += try TaggedSecrets.listVariants(namespace: namespace, key: key)
                         return Response(ok: true, value: nil, keys: lines, locked: false, error: nil)
@@ -117,7 +151,7 @@ final class Daemon {
                     let keys = try KeychainStore.list(namespace: namespace)
                     let lines = keys.map { key -> String in
                         if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
-                            return "\(key) — \(description)"
+                            return "\(key) — \(sanitizedForTerminal(description))"
                         }
                         return key
                     }
@@ -204,7 +238,14 @@ final class Daemon {
             failureReason = error?.localizedDescription
             semaphore.signal()
         }
-        semaphore.wait()
+        // LocalAuthentication has its own timeout, but nothing here should
+        // rest on it: a prompt that somehow never resolves would otherwise
+        // hold the unlock gate — and every future unlock — until a restart.
+        if semaphore.wait(timeout: .now() + 300) == .timedOut {
+            context.invalidate()
+            log("unlock of '\(namespace)' abandoned: prompt unanswered for 5 minutes")
+            return Response(ok: false, value: nil, keys: nil, locked: true, error: "Touch ID prompt timed out")
+        }
 
         if success {
             queue.sync { _ = authorizedNamespaces[anchor, default: []].insert(namespace) }
