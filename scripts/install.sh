@@ -16,6 +16,13 @@ mkdir -p "$BIN_DIR" "$LOG_DIR" "$LAUNCH_AGENTS_DIR"
 cp "$REPO_DIR/.build/release/secrets" "$BIN_DIR/secrets"
 chmod 755 "$BIN_DIR/secrets"
 
+# The daemon log records key NAMES, namespaces and requesting pids/paths (never
+# values) — still not for other accounts' eyes. launchd appends to an existing
+# file without touching its mode, so create them 0600 before it does.
+chmod 700 "$LOG_DIR"
+touch "$LOG_DIR/secretsd.out.log" "$LOG_DIR/secretsd.err.log"
+chmod 600 "$LOG_DIR"/secretsd.*.log
+
 sed -e "s|__BIN_PATH__|$BIN_DIR/secrets|g" -e "s|__LOG_DIR__|$LOG_DIR|g" \
     "$REPO_DIR/LaunchAgents/$LABEL.plist" > "$PLIST_PATH"
 

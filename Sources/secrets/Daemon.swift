@@ -168,7 +168,13 @@ final class Daemon {
             }
         }
 
-        let reason = "Unlock the '\(namespace)' secrets for \((anchor.path as NSString).lastPathComponent) (pid \(anchor.pid))"
+        // The prompt is the user's only chance to notice a request they didn't
+        // make: any local process can ask for an unlock and hope the user
+        // approves it reflexively. Naming the exact requesting executable and
+        // pid lets an unexpected one stand out; a bare basename like "zsh"
+        // wouldn't.
+        let displayPath = anchor.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let reason = "Unlock '\(namespace)' for \(displayPath) (pid \(anchor.pid))"
         let semaphore = DispatchSemaphore(value: 0)
         var success = false
         var failureReason: String?

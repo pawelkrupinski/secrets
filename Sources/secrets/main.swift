@@ -95,7 +95,9 @@ guard arguments.count > 1 else {
 
 switch arguments[1] {
 case "daemon":
-    try FileManager.default.createDirectory(atPath: socketDir, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(
+        atPath: socketDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    chmod(socketDir, 0o700)
     let daemon = Daemon()
     let server = SocketServer(socketPath: socketPath, daemon: daemon)
     try server.run()

@@ -76,6 +76,23 @@ descendants), for as long as that process stays alive.
   as the pinned process stays alive — close that Claude Code conversation
   (or terminal) and the next `get` from anywhere fails closed, requiring
   a fresh Touch ID prompt. `secrets lock [namespace]` ends it early on demand.
+- **Pid reuse can't inherit a session**: the anchor is (pid, executable
+  path, process start time), and every request re-reads all three. A later
+  process that lands on a dead session's pid — even another `claude` at the
+  same path, like the next session you open — has a different start time and
+  gets `locked`.
+- **The unlock prompt names the requester**: any local process can *ask*
+  for an unlock and hope you approve reflexively. The Touch ID dialog shows
+  the exact requesting executable path and pid, so only approve one when
+  you just ran `secrets unlock` yourself and it names what you expect.
+- **Daemon hardening against local misuse**: `SIGPIPE` is ignored (a client
+  that disconnects before reading its reply used to kill the daemon and wipe
+  every session's unlock — any local process could do that on purpose);
+  requests are capped at 4 MiB and socket I/O times out, so a client can't
+  exhaust memory or pin a handler thread; the socket is created under a
+  `077` umask (never briefly world-connectable), in a `0700` directory, and
+  the daemon log — key names and requester pids only, never values — is
+  `0600`.
 - **What this does *not* protect against**: anything already running
   inside the trusted process's own descendants during the unlocked window
   (e.g. another Bash tool call in the *same* Claude conversation, for the
@@ -163,8 +180,11 @@ secrets lock                     # end authorization for every namespace
 ```
 
 `set` reads the value from stdin rather than argv, so it never shows up
-in `ps`/shell history the way a literal `secrets set KEY value` would.
-Prefer a heredoc or pipe:
+in `ps` the way a literal `secrets set KEY value` would. Note that a
+here-string (`<<< "value"`) typed at an interactive prompt *is* still
+recorded in your shell history as part of the command line — for anything
+sensitive, pipe from a file or use a heredoc in a script rather than
+typing the value inline:
 
 ```sh
 secrets set movies OMDB_API_KEY <<'EOF'

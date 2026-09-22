@@ -4,9 +4,16 @@ import Foundation
 /// Identifies the process that should be trusted for a given socket connection,
 /// so the daemon can pin an unlock to one specific Claude Code session (or one
 /// bare terminal shell) instead of trusting every process the Mac user owns.
+///
+/// `startTime` is what makes the pin hold up against pid reuse: pids are
+/// recycled, and a later process — including another `claude` at the very same
+/// executable path, e.g. the next session the user opens — could otherwise land
+/// on a pid that a dead session had unlocked. A (pid, path, start time) triple
+/// names one specific process instance, not just a pid.
 struct SessionAnchor: Hashable {
     let pid: pid_t
     let path: String
+    let startTime: UInt64
 }
 
 enum ProcessAncestry {
@@ -30,12 +37,27 @@ enum ProcessAncestry {
         return String(cString: buffer)
     }
 
-    static func parentPID(of pid: pid_t) -> pid_t? {
+    private static func bsdInfo(of pid: pid_t) -> proc_bsdinfo? {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         let result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
-        guard result == size else { return nil }
-        return pid_t(bitPattern: info.pbi_ppid)
+        return result == size ? info : nil
+    }
+
+    static func parentPID(of pid: pid_t) -> pid_t? {
+        bsdInfo(of: pid).map { pid_t(bitPattern: $0.pbi_ppid) }
+    }
+
+    /// Whole seconds since the epoch at which the process started, as the
+    /// kernel records it — stable for the life of the process, different for
+    /// any later process that reuses its pid.
+    static func startTime(of pid: pid_t) -> UInt64? {
+        bsdInfo(of: pid).map { $0.pbi_start_tvsec }
+    }
+
+    private static func anchor(for pid: pid_t) -> SessionAnchor? {
+        guard let path = executablePath(of: pid), let start = startTime(of: pid) else { return nil }
+        return SessionAnchor(pid: pid, path: path, startTime: start)
     }
 
     /// Claude Code's actual running binary is a versioned file under
@@ -61,12 +83,12 @@ enum ProcessAncestry {
         var fallback: SessionAnchor?
         for _ in 0..<maxDepth {
             guard let parent = parentPID(of: pid), parent > 1 else { break }
-            guard let path = executablePath(of: parent) else { break }
+            guard let candidate = anchor(for: parent) else { break }
             if fallback == nil {
-                fallback = SessionAnchor(pid: parent, path: path)
+                fallback = candidate
             }
-            if looksLikeClaudeCode(path) {
-                return SessionAnchor(pid: parent, path: path)
+            if looksLikeClaudeCode(candidate.path) {
+                return candidate
             }
             pid = parent
         }
@@ -74,8 +96,9 @@ enum ProcessAncestry {
     }
 
     /// Re-checks that the pinned anchor is still the same live process
-    /// (defends against a later, unrelated process reusing the same pid).
+    /// instance: same executable AND same start time, so a later process that
+    /// reuses the pid — even one running the same binary — doesn't inherit it.
     static func isAnchorStillValid(_ anchor: SessionAnchor) -> Bool {
-        executablePath(of: anchor.pid) == anchor.path
+        executablePath(of: anchor.pid) == anchor.path && startTime(of: anchor.pid) == anchor.startTime
     }
 }
