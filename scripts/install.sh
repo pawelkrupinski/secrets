@@ -18,8 +18,15 @@ mkdir -p "$BIN_DIR" "$LOG_DIR" "$LAUNCH_AGENTS_DIR"
 # a mapped binary in place can crash the running process, and a crash here
 # would be mistaken for a bug in the new build.
 launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-cp "$REPO_DIR/.build/release/secrets" "$BIN_DIR/secrets"
-chmod 755 "$BIN_DIR/secrets"
+# Install as a NEW FILE (copy to a temp name, then rename over), never `cp` onto
+# the existing path. `cp` rewrites the old inode in place, and on Apple Silicon
+# the kernel keeps that inode's code-signature validation cached, so the new
+# bytes fail it and every launch is SIGKILLed — launchd reports
+# `last exit reason = OS_REASON_CODESIGNING` and the CLI exits 137. A rename
+# gives the binary a fresh inode, which is validated from scratch.
+cp "$REPO_DIR/.build/release/secrets" "$BIN_DIR/.secrets.new"
+chmod 755 "$BIN_DIR/.secrets.new"
+mv -f "$BIN_DIR/.secrets.new" "$BIN_DIR/secrets"
 
 # The daemon log records key NAMES, namespaces and requesting pids/paths (never
 # values) — still not for other accounts' eyes. launchd appends to an existing

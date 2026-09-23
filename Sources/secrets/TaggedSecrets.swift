@@ -207,13 +207,16 @@ enum TaggedSecrets {
         if var envelope = try loadEnvelope(existingRaw) {
             envelope.description = description
             try write(envelope, namespace: namespace, key: key)
-            return
+        } else {
+            // Upgrade a plain legacy value into an envelope so it has somewhere
+            // to carry the description, keeping it as the sole untagged variant.
+            try write(SecretEnvelope(secretsVaultVariants: true, description: description,
+                                     variants: [SecretVariant(tags: [:], value: existingRaw)], previous: nil),
+                      namespace: namespace, key: key)
         }
-        // Upgrade a plain legacy value into an envelope so it has somewhere
-        // to carry the description, keeping it as the sole untagged variant.
-        try write(SecretEnvelope(secretsVaultVariants: true, description: description,
-                                 variants: [SecretVariant(tags: [:], value: existingRaw)], previous: nil),
-                  namespace: namespace, key: key)
+        // Mirrored into the item's comment attribute, which is what `list`
+        // reads — see KeychainStore.setComment for why list must not decrypt.
+        try KeychainStore.setComment(namespace: namespace, key: key, comment: description)
     }
 
     static func getDescription(namespace: String, key: String) -> String? {

@@ -89,7 +89,30 @@ struct KeychainStore {
         }
     }
 
-    static func list(namespace: String) throws -> [String] {
+    /// Stores a key's human description in the item's *comment attribute*,
+    /// not inside its secret payload. Attributes are readable without the
+    /// item's decrypt authorization, so `list` can show descriptions without
+    /// ever touching a secret value — which matters because every item
+    /// created by an older ad-hoc build of this tool still trusts only that
+    /// build's exact code signature, and decrypting one raises a login
+    /// keychain password prompt per item. Reading all of them to render
+    /// `list` was a wall of 100+ prompts that "Always Allow" only ever
+    /// cleared one at a time.
+    static func setComment(namespace: String, key: String, comment: String) throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service(for: namespace),
+            kSecAttrAccount as String: key
+        ]
+        let status = SecItemUpdate(query as CFDictionary, [kSecAttrComment as String: comment] as CFDictionary)
+        guard status == errSecSuccess else {
+            throw status == errSecItemNotFound ? KeychainError.notFound : KeychainError.unhandled(status)
+        }
+    }
+
+    /// Key names with their comment attribute, read from attributes alone —
+    /// never decrypts, so it never prompts, whichever build created an item.
+    static func listWithComments(namespace: String) throws -> [(key: String, comment: String?)] {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service(for: namespace),
@@ -102,6 +125,12 @@ struct KeychainStore {
         guard status == errSecSuccess, let items = result as? [[String: Any]] else {
             throw KeychainError.unhandled(status)
         }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }.sorted()
+        return items
+            .compactMap { item -> (key: String, comment: String?)? in
+                guard let key = item[kSecAttrAccount as String] as? String else { return nil }
+                let comment = (item[kSecAttrComment as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return (key, comment)
+            }
+            .sorted { $0.key < $1.key }
     }
 }

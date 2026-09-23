@@ -155,16 +155,22 @@ final class Daemon {
                         var lines: [String] = []
                         if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
                             lines.append("description: \(sanitizedForTerminal(description))")
+                            // Backfill the comment attribute for keys described
+                            // before descriptions lived there, so the whole-
+                            // namespace `list` can show it without decrypting.
+                            try? KeychainStore.setComment(namespace: namespace, key: key, comment: description)
                         }
                         lines += try TaggedSecrets.listVariants(namespace: namespace, key: key)
                         return Response(ok: true, value: nil, keys: lines, locked: false, error: nil)
                     }
-                    let keys = try KeychainStore.list(namespace: namespace)
-                    let lines = keys.map { key -> String in
-                        if let description = TaggedSecrets.getDescription(namespace: namespace, key: key) {
-                            return "\(key) — \(sanitizedForTerminal(description))"
+                    // Attributes only — never decrypts, so never prompts. Keys
+                    // described before 2026-09-23 show no description here
+                    // until `list NAMESPACE KEY` or `describe` backfills it.
+                    let lines = try KeychainStore.listWithComments(namespace: namespace).map { entry -> String in
+                        if let description = entry.comment {
+                            return "\(entry.key) — \(sanitizedForTerminal(description))"
                         }
-                        return key
+                        return entry.key
                     }
                     return Response(ok: true, value: nil, keys: lines, locked: false, error: nil)
                 } catch {
