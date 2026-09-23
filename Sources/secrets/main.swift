@@ -1,7 +1,10 @@
 import Foundation
 
 let socketDir = NSString(string: "~/Library/Application Support/secrets").expandingTildeInPath
-let socketPath = socketDir + "/secrets.sock"
+// Overridable so a second daemon can run beside the LaunchAgent's -- used to
+// migrate between builds and to test one before installing it. Keep it short:
+// a Unix socket path is capped at 104 bytes.
+let socketPath = ProcessInfo.processInfo.environment["SECRETS_SOCKET_PATH"] ?? socketDir + "/secrets.sock"
 
 func printUsage() {
     print("""

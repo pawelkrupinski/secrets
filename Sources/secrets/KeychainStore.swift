@@ -33,9 +33,27 @@ enum KeychainError: Error, CustomStringConvertible {
 /// process on the same macOS account reading Keychain directly, and it
 /// isn't workable to maintain against a tool under active iteration.
 struct KeychainStore {
+    /// `v2` since 2026-09-23: items re-created by the Apple Development
+    /// signed build (see install.sh), which binds them to that signing
+    /// identity instead of one build's cdhash. A fresh service rather than
+    /// rewriting the old items in place, because updating an item keeps its
+    /// old creator-only ACL — and deleting one owned by another build is
+    /// itself a prompt. The unsuffixed `dev.pawel.secrets.<ns>` items are the
+    /// pre-migration copies.
     static func service(for namespace: String) -> String {
-        "dev.pawel.secrets.\(namespace)"
+        "dev.pawel.secrets.v2.\(namespace)"
     }
+
+    /// The `kind` attribute (kSecAttrDescription) of a key that has been
+    /// deleted but could not be REMOVED. Only the build that created an item
+    /// may SecItemDelete it -- any other build, even one signed with the same
+    /// identity, gets errSecInvalidOwnerEdit (-25244), measured 2026-09-23 --
+    /// while any same-identity build may update it. So a delete after a
+    /// rebuild empties the item and marks it with this instead; get and list
+    /// treat it as absent, and the next set revives it. Tombstones can be
+    /// purged by hand in Keychain Access (service dev.pawel.secrets.v2.*).
+    private static let tombstoneKind = "secrets:deleted"
+    private static let liveKind = "secrets"
 
     static func set(namespace: String, key: String, value: String) throws {
         let data = Data(value.utf8)
@@ -44,10 +62,14 @@ struct KeychainStore {
             kSecAttrService as String: service(for: namespace),
             kSecAttrAccount as String: key
         ]
-        let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        // Resetting the kind on every write is what revives a tombstone.
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data, kSecAttrDescription as String: liveKind] as CFDictionary)
         if updateStatus == errSecItemNotFound {
             var addQuery = query
             addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrDescription as String] = liveKind
             addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
             guard addStatus == errSecSuccess else {
@@ -64,6 +86,7 @@ struct KeychainStore {
             kSecAttrService as String: service(for: namespace),
             kSecAttrAccount as String: key,
             kSecReturnData as String: true,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: AnyObject?
@@ -71,7 +94,10 @@ struct KeychainStore {
         guard status == errSecSuccess else {
             throw status == errSecItemNotFound ? KeychainError.notFound : KeychainError.unhandled(status)
         }
-        guard let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
+        guard let item = result as? [String: Any],
+              item[kSecAttrDescription as String] as? String != tombstoneKind,
+              let data = item[kSecValueData as String] as? Data,
+              let value = String(data: data, encoding: .utf8) else {
             throw KeychainError.notFound
         }
         return value
@@ -84,6 +110,17 @@ struct KeychainStore {
             kSecAttrAccount as String: key
         ]
         let status = SecItemDelete(query as CFDictionary)
+        if status == errSecInvalidOwnerEdit {
+            // Created by another build: empty it and mark it deleted instead.
+            let tombstone: [String: Any] = [
+                kSecValueData as String: Data(),
+                kSecAttrDescription as String: tombstoneKind,
+                kSecAttrComment as String: ""
+            ]
+            let updateStatus = SecItemUpdate(query as CFDictionary, tombstone as CFDictionary)
+            guard updateStatus == errSecSuccess else { throw KeychainError.unhandled(updateStatus) }
+            return
+        }
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.unhandled(status)
         }
@@ -127,7 +164,8 @@ struct KeychainStore {
         }
         return items
             .compactMap { item -> (key: String, comment: String?)? in
-                guard let key = item[kSecAttrAccount as String] as? String else { return nil }
+                guard let key = item[kSecAttrAccount as String] as? String,
+                      item[kSecAttrDescription as String] as? String != tombstoneKind else { return nil }
                 let comment = (item[kSecAttrComment as String] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 return (key, comment)
             }

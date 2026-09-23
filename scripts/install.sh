@@ -26,6 +26,18 @@ launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
 # gives the binary a fresh inode, which is validated from scratch.
 cp "$REPO_DIR/.build/release/secrets" "$BIN_DIR/.secrets.new"
 chmod 755 "$BIN_DIR/.secrets.new"
+# SIGNED WITH A REAL IDENTITY, NOT LEFT AD-HOC. Keychain items trust the code
+# identity of the binary that created them; for an ad-hoc build that is the
+# exact cdhash, so every rebuild orphaned every item and macOS asked for the
+# login password once per item. Signed, the identity is "identifier
+# dev.pawel.secrets + this certificate" and the team partition, which survive
+# rebuilds (and yearly certificate renewal, since the match is on the name).
+IDENTITY="${SECRETS_CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)}"
+if [ -z "$IDENTITY" ]; then
+    echo "No Apple Development signing identity found (set SECRETS_CODESIGN_IDENTITY)." >&2
+    exit 1
+fi
+codesign --force --sign "$IDENTITY" --identifier dev.pawel.secrets "$BIN_DIR/.secrets.new"
 mv -f "$BIN_DIR/.secrets.new" "$BIN_DIR/secrets"
 
 # The daemon log records key NAMES, namespaces and requesting pids/paths (never
